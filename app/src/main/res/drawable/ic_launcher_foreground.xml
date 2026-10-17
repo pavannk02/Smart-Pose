@@ -1,0 +1,33 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Outer Smart Glow Ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="1.5"
+        android:pathData="M 54 22 A 32 32 0 1 1 53.9 22 Z" />
+        
+    <!-- Minimalist Camera Base Body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 32,36 h 12 l 3,-5 h 14 l 3,5 h 12 c 2.2,0 4,1.8 4,4 v 24 c 0,2.2 -1.8,4 -4,4 H 32 c -2.2,0 -4,-1.8 -4,-4 V 40 c 0,-2.2 1.8,-4 4,-4 z" />
+
+    <!-- Lens Ring (Outer) -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M 54,40 c -7.2,0 -13,5.8 -13,13 0,7.2 5.8,13 13,13 7.2,0 13,-5.8 13,-13 0,-7.2 -5.8,-13 -13,-13 z" />
+
+    <!-- Inner Camera Lens Pupil -->
+    <path
+        android:fillColor="#121212"
+        android:pathData="M 54,46 c -3.9,0 -7,3.1 -7,7 0,3.9 3.1,7 7,7 3.9,0 7,-3.1 7,-7 0,-3.9 -3.1,-7 -7,-7 z" />
+
+    <!-- Flashing Spark Dot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 57,51 c -0.6,0 -1,0.4 -1,1 0,0.6 0.4,1 1,1 0.6,0 1,-0.4 1,-1 0,-0.6 -0.4,-1 -1,-1 z" />
+</vector>

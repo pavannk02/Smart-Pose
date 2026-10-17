@@ -1,0 +1,6 @@
+{
+  "name": "Smart Pose",
+  "description": "Smart camera app powered by Gemini 3.8 Flash with optional Google Maps & Google Search grounding to discover places and overlay perfect pose wireframes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
