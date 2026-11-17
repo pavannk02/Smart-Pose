@@ -116,6 +116,11 @@ fun CameraScreen(
     // Modal state for Google Maps and Search grounding config
     var showMapsSearchSheet by remember { mutableStateOf(false) }
 
+    // Optional Timer state (0 = Off / Immediate Click by default; options: 0, 3, 5, 10)
+    val timerOptions = remember { listOf(0, 3, 5, 10) }
+    var selectedTimerSeconds by remember { mutableStateOf(0) }
+    var countdownRemaining by remember { mutableStateOf<Int?>(null) }
+
     // Location permission state - only requested when user explicitly enables GPS
     val locationPermissionState = rememberPermissionState(Manifest.permission.ACCESS_FINE_LOCATION)
 
@@ -129,6 +134,20 @@ fun CameraScreen(
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     val imageCapture = remember { ImageCapture.Builder().build() }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    LaunchedEffect(countdownRemaining) {
+        val current = countdownRemaining ?: return@LaunchedEffect
+        if (current > 0) {
+            kotlinx.coroutines.delay(1000L)
+            val next = current - 1
+            if (next <= 0) {
+                countdownRemaining = null
+                captureAndProcess(imageCapture, cameraExecutor, viewModel)
+            } else {
+                countdownRemaining = next
+            }
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         onDispose {
@@ -288,6 +307,38 @@ fun CameraScreen(
                             tint = if (isLocationActive) NeonAmber else Color.White,
                             modifier = Modifier.size(20.dp)
                         )
+                    }
+
+                    // Optional Timer Toggle Button (Default: Off / 0s)
+                    IconButton(
+                        onClick = {
+                            val nextIdx = (timerOptions.indexOf(selectedTimerSeconds) + 1) % timerOptions.size
+                            selectedTimerSeconds = timerOptions[nextIdx]
+                        },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                if (selectedTimerSeconds > 0) NeonAmber.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.6f),
+                                CircleShape
+                            )
+                            .testTag("timer_toggle_button")
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.Timer,
+                                contentDescription = "Optional capture timer",
+                                tint = if (selectedTimerSeconds > 0) NeonAmber else Color.White.copy(alpha = 0.75f),
+                                modifier = Modifier.size(if (selectedTimerSeconds > 0) 15.dp else 20.dp)
+                            )
+                            if (selectedTimerSeconds > 0) {
+                                Text(
+                                    text = "${selectedTimerSeconds}s",
+                                    color = NeonAmber,
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
 
                     // Flash Control Button
@@ -464,11 +515,48 @@ fun CameraScreen(
                     }
                 }
 
-                // Main Capture/Analyse Button
+                // Live Countdown Overlay when Optional Timer is Active
+                if (countdownRemaining != null) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.8f)),
+                        shape = RoundedCornerShape(20.dp),
+                        border = BorderStroke(1.5.dp, NeonAmber)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "${countdownRemaining}s",
+                                color = NeonAmber,
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "Get into pose...",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            TextButton(onClick = { countdownRemaining = null }) {
+                                Text("Cancel", color = NeonPink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                // Main Capture/Analyse Button (Default: immediate click photo; or starts countdown if timer > 0)
                 ShutterButton(
                     isAnalyzing = uiState is CameraUiState.Analyzing,
                     onClick = {
-                        captureAndProcess(imageCapture, cameraExecutor, viewModel)
+                        if (countdownRemaining != null) {
+                            countdownRemaining = null
+                        } else if (selectedTimerSeconds > 0) {
+                            countdownRemaining = selectedTimerSeconds
+                        } else {
+                            captureAndProcess(imageCapture, cameraExecutor, viewModel)
+                        }
                     },
                     modifier = Modifier.testTag("analyze_trigger_shutter")
                 )
@@ -1304,6 +1392,16 @@ fun FavoritesScreen(
     onBack: () -> Unit
 ) {
     val savedPoses by viewModel.savedPoses.collectAsState()
+    var sortOrder by remember { mutableStateOf("Newest") }
+    var sortDropdownExpanded by remember { mutableStateOf(false) }
+
+    val sortedPoses = remember(savedPoses, sortOrder) {
+        if (sortOrder == "Newest") {
+            savedPoses.sortedByDescending { it.timestamp }
+        } else {
+            savedPoses.sortedBy { it.timestamp }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1312,33 +1410,88 @@ fun FavoritesScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // App top header
+        // App top header with Sorting Dropdown ('Newest' / 'Oldest')
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back to camera view",
-                    tint = Color.White
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back to camera view",
+                        tint = Color.White
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Saved Poses",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = "Saved Pose Guides",
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
+
+            // Sort Dropdown ('Newest' vs 'Oldest')
+            Box {
+                OutlinedButton(
+                    onClick = { sortDropdownExpanded = true },
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.5f)),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.testTag("saved_poses_sort_dropdown")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sort,
+                        contentDescription = "Sort saved poses",
+                        tint = NeonCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = sortOrder,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = null,
+                        tint = Color.Gray,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = sortDropdownExpanded,
+                    onDismissRequest = { sortDropdownExpanded = false },
+                    modifier = Modifier.background(Color(0xFF1E1E2A))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Newest", color = if (sortOrder == "Newest") NeonCyan else Color.White) },
+                        onClick = {
+                            sortOrder = "Newest"
+                            sortDropdownExpanded = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Oldest", color = if (sortOrder == "Oldest") NeonCyan else Color.White) },
+                        onClick = {
+                            sortOrder = "Oldest"
+                            sortDropdownExpanded = false
+                        }
+                    )
+                }
+            }
         }
 
-        if (savedPoses.isEmpty()) {
+        if (sortedPoses.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1378,7 +1531,7 @@ fun FavoritesScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                items(savedPoses) { savedPose ->
+                items(sortedPoses) { savedPose ->
                     FavoritePoseCard(
                         pose = savedPose,
                         onSelect = {

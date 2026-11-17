@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   Camera,
   RefreshCw,
@@ -15,10 +15,22 @@ import {
   Check,
   Compass,
   Eye,
-  Layers
+  Layers,
+  Timer,
+  ArrowUpDown,
+  Database,
+  Copy
 } from 'lucide-react';
 import { PoseResponse, SavedPose, WireframeStyle } from './types/pose';
 import { analyzeSceneWithGemini, reverseGeocodeCoords } from './services/geminiWebService';
+import {
+  getSupabaseConfig,
+  saveSupabaseConfig,
+  fetchPosesFromSupabase,
+  insertPoseToSupabase,
+  deletePoseFromSupabase,
+  SUPABASE_TABLE_SQL
+} from './services/supabaseService';
 import { PoseWireframeSvg } from './components/PoseWireframeSvg';
 import { MapsSearchModal } from './components/MapsSearchModal';
 
@@ -33,9 +45,14 @@ const STYLE_LABELS: { id: WireframeStyle; label: string }[] = [
   { id: 'crossed_arms', label: 'Crossed Arms' }
 ];
 
+const TIMER_OPTIONS = [0, 3, 5, 10] as const;
+type TimerSeconds = (typeof TIMER_OPTIONS)[number];
+type SortOrder = 'newest' | 'oldest';
+
 export const App: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const countdownIntervalRef = useRef<number | null>(null);
 
   // Camera & Media states
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
@@ -46,12 +63,17 @@ export const App: React.FC = () => {
   const [showGrid, setShowGrid] = useState(true);
   const [screenFlash, setScreenFlash] = useState(false);
 
+  // Optional Timer state (Default = 0 / Off, immediate click photo)
+  const [timerSeconds, setTimerSeconds] = useState<TimerSeconds>(0);
+  const [countdownRemaining, setCountdownRemaining] = useState<number | null>(null);
+  const [showTimerMenu, setShowTimerMenu] = useState(false);
+
   // AI & Pose states
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activePose, setActivePose] = useState<PoseResponse | null>(null);
   const [manualWireframe, setManualWireframe] = useState<WireframeStyle | null>(null);
 
-  // Optional Google Maps & Search Grounding states (disabled by default per user instructions)
+  // Optional Google Maps & Search Grounding states (disabled by default)
   const [isMapsEnabled, setIsMapsEnabled] = useState(false);
   const [isSearchEnabled, setIsSearchEnabled] = useState(false);
   const [detectedLocation, setDetectedLocation] = useState('');
@@ -60,7 +82,7 @@ export const App: React.FC = () => {
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [showMapsModal, setShowMapsModal] = useState(false);
 
-  // Saved poses & settings drawers
+  // Saved poses, sorting, & settings drawers
   const [savedPoses, setSavedPoses] = useState<SavedPose[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_SAVED_POSES);
@@ -69,18 +91,57 @@ export const App: React.FC = () => {
       return [];
     }
   });
+  const [sortOrder, setSortOrder] = useState<SortOrder>('newest');
   const [showSavedDrawer, setShowSavedDrawer] = useState(false);
   const [showApiModal, setShowApiModal] = useState(false);
   const [userApiKey, setUserApiKey] = useState<string>(() => {
     return localStorage.getItem(STORAGE_KEY_API_KEY) || '';
   });
+
+  // Optional Supabase Cloud Database state
+  const initialSupa = getSupabaseConfig();
+  const [supabaseUrl, setSupabaseUrl] = useState<string>(initialSupa?.url || '');
+  const [supabaseAnonKey, setSupabaseAnonKey] = useState<string>(initialSupa?.anonKey || '');
+  const [isSupabaseSynced, setIsSupabaseSynced] = useState<boolean>(Boolean(initialSupa));
+  const [copiedSql, setCopiedSql] = useState(false);
+
   const [justSavedToast, setJustSavedToast] = useState(false);
+
+  // Sorted saved poses based on dropdown selection ('newest' vs 'oldest')
+  const sortedSavedPoses = useMemo(() => {
+    return [...savedPoses].sort((a, b) =>
+      sortOrder === 'newest' ? b.timestamp - a.timestamp : a.timestamp - b.timestamp
+    );
+  }, [savedPoses, sortOrder]);
+
+  // Sync from Supabase on mount if configured
+  useEffect(() => {
+    const cfg = getSupabaseConfig();
+    if (!cfg) {
+      setIsSupabaseSynced(false);
+      return;
+    }
+    setIsSupabaseSynced(true);
+    fetchPosesFromSupabase(cfg).then((remotePoses) => {
+      if (remotePoses && remotePoses.length > 0) {
+        setSavedPoses((local) => {
+          const map = new Map<string, SavedPose>();
+          [...local, ...remotePoses].forEach((item) => map.set(item.id, item));
+          const merged = Array.from(map.values()).sort((a, b) => b.timestamp - a.timestamp);
+          localStorage.setItem(STORAGE_KEY_SAVED_POSES, JSON.stringify(merged));
+          return merged;
+        });
+      }
+    });
+  }, []);
 
   // Start or switch WebRTC camera stream
   const startCamera = useCallback(async (mode: 'user' | 'environment') => {
     setCameraError(null);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setCameraError('Camera API not supported in this browser. You can still upload a photo or use interactive pose guides!');
+      setCameraError(
+        'Camera API not supported in this browser. You can still upload a photo or use interactive pose guides!'
+      );
       return;
     }
 
@@ -106,7 +167,9 @@ export const App: React.FC = () => {
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Camera permission declined';
-      setCameraError(`Live camera unavailable (${msg}). Use "Upload Photo" or explore interactive pose wireframes below.`);
+      setCameraError(
+        `Live camera unavailable (${msg}). Use "Upload Photo" or explore interactive pose wireframes below.`
+      );
       setCameraReady(false);
     }
   }, []);
@@ -123,7 +186,16 @@ export const App: React.FC = () => {
     };
   }, [facingMode, uploadedImage, startCamera]);
 
-  // Handle Optional Live GPS Toggle (only requests browser permission when user explicitly enables it)
+  // Cleanup countdown interval on unmount
+  useEffect(() => {
+    return () => {
+      if (countdownIntervalRef.current) {
+        window.clearInterval(countdownIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Handle Optional Live GPS Toggle
   const handleToggleMapsGps = useCallback((enable: boolean) => {
     setIsMapsEnabled(enable);
     setGpsError(null);
@@ -185,8 +257,8 @@ export const App: React.FC = () => {
     return canvas.toDataURL('image/jpeg', 0.8);
   }, [uploadedImage, cameraReady, isMirrored]);
 
-  // Trigger AI Pose Analysis
-  const handleAnalyzeScene = useCallback(async () => {
+  // Execute immediate photo capture & AI pose analysis
+  const executeImmediateCaptureAndAnalyze = useCallback(async () => {
     setIsAnalyzing(true);
     setScreenFlash(true);
     setTimeout(() => setScreenFlash(false), 180);
@@ -215,8 +287,56 @@ export const App: React.FC = () => {
     userApiKey
   ]);
 
-  // Save current pose to browser localStorage
-  const handleSavePose = () => {
+  // Cancel active countdown timer
+  const handleCancelCountdown = useCallback(() => {
+    if (countdownIntervalRef.current) {
+      window.clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setCountdownRemaining(null);
+  }, []);
+
+  // Trigger Shutter: if timerSeconds === 0 (default), click photo immediately; else run countdown
+  const handleShutterClick = useCallback(() => {
+    if (isAnalyzing) return;
+
+    // If countdown is already running, clicking shutter cancels it
+    if (countdownRemaining !== null) {
+      handleCancelCountdown();
+      return;
+    }
+
+    if (timerSeconds <= 0) {
+      executeImmediateCaptureAndAnalyze();
+      return;
+    }
+
+    let remaining = timerSeconds;
+    setCountdownRemaining(remaining);
+
+    countdownIntervalRef.current = window.setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        if (countdownIntervalRef.current) {
+          window.clearInterval(countdownIntervalRef.current);
+          countdownIntervalRef.current = null;
+        }
+        setCountdownRemaining(null);
+        executeImmediateCaptureAndAnalyze();
+      } else {
+        setCountdownRemaining(remaining);
+      }
+    }, 1000);
+  }, [
+    isAnalyzing,
+    countdownRemaining,
+    timerSeconds,
+    handleCancelCountdown,
+    executeImmediateCaptureAndAnalyze
+  ]);
+
+  // Save current pose to browser localStorage (+ optional Supabase Cloud Sync)
+  const handleSavePose = async () => {
     if (!activePose) return;
     const locLabel =
       activePose.place_info?.place_name ||
@@ -241,12 +361,22 @@ export const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEY_SAVED_POSES, JSON.stringify(updated));
     setJustSavedToast(true);
     setTimeout(() => setJustSavedToast(false), 2000);
+
+    const supaCfg = getSupabaseConfig();
+    if (supaCfg) {
+      await insertPoseToSupabase(supaCfg, newEntry);
+    }
   };
 
-  const handleDeleteSavedPose = (id: string) => {
+  const handleDeleteSavedPose = async (id: string) => {
     const updated = savedPoses.filter((p) => p.id !== id);
     setSavedPoses(updated);
     localStorage.setItem(STORAGE_KEY_SAVED_POSES, JSON.stringify(updated));
+
+    const supaCfg = getSupabaseConfig();
+    if (supaCfg) {
+      await deletePoseFromSupabase(supaCfg, id);
+    }
   };
 
   // Download high-res snapshot
@@ -328,6 +458,49 @@ export const App: React.FC = () => {
             </span>
           </button>
 
+          {/* Optional Timer Dropdown Pill (Default: Off / Instant Click) */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowTimerMenu((prev) => !prev)}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold border transition ${
+                timerSeconds > 0
+                  ? 'bg-amber-400/20 border-amber-400 text-amber-300 shadow-lg shadow-amber-500/10'
+                  : 'bg-white/10 border-white/10 text-gray-300 hover:bg-white/20'
+              }`}
+              title="Optional Self-Timer (Default: Off / Instant Click)"
+            >
+              <Timer className="h-4 w-4" />
+              <span>{timerSeconds === 0 ? 'Timer: Off' : `${timerSeconds}s`}</span>
+            </button>
+
+            {showTimerMenu && (
+              <div className="absolute right-0 mt-2 w-40 rounded-2xl border border-white/15 bg-[#12141F] p-1.5 shadow-2xl z-50">
+                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                  Capture Timer
+                </div>
+                {TIMER_OPTIONS.map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => {
+                      setTimerSeconds(sec);
+                      setShowTimerMenu(false);
+                    }}
+                    className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-xs font-semibold transition ${
+                      timerSeconds === sec
+                        ? 'bg-cyan-400 text-black'
+                        : 'text-gray-200 hover:bg-white/10'
+                    }`}
+                  >
+                    <span>{sec === 0 ? 'Off (Instant Click)' : `${sec} Seconds`}</span>
+                    {timerSeconds === sec && <Check className="h-3.5 w-3.5" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Grid Toggle */}
           <button
             type="button"
@@ -401,16 +574,16 @@ export const App: React.FC = () => {
             )}
           </button>
 
-          {/* Gemini API Key Settings */}
+          {/* Gemini API Key & Optional Supabase Settings */}
           <button
             type="button"
             onClick={() => setShowApiModal(true)}
             className={`rounded-full p-2.5 border transition ${
-              userApiKey
+              userApiKey || isSupabaseSynced
                 ? 'bg-emerald-500/20 border-emerald-400/40 text-emerald-300'
                 : 'bg-white/10 border-white/10 text-gray-300 hover:bg-white/20'
             }`}
-            title="Configure Optional Gemini API Key"
+            title="Configure Optional Gemini API Key & Supabase Cloud Sync"
           >
             <Key className="h-4 w-4" />
           </button>
@@ -419,7 +592,6 @@ export const App: React.FC = () => {
 
       {/* Main Viewfinder Stage */}
       <main className="relative flex-1 flex flex-col items-center justify-center overflow-hidden">
-        {/* Live Video or Uploaded Photo */}
         <div className="relative h-[calc(100vh-140px)] w-full max-w-5xl overflow-hidden sm:rounded-3xl border border-white/10 bg-[#11131C] shadow-2xl">
           {uploadedImage ? (
             <img
@@ -441,6 +613,26 @@ export const App: React.FC = () => {
 
           {/* Subtle Studio Vignette */}
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/35" />
+
+          {/* Live Countdown Timer Overlay (when user enables optional 3s/5s/10s timer) */}
+          {countdownRemaining !== null && (
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/45 backdrop-blur-[2px]">
+              <div className="flex h-36 w-36 items-center justify-center rounded-full border-4 border-amber-400 bg-black/75 text-7xl font-black text-amber-300 shadow-[0_0_50px_rgba(255,171,0,0.6)] animate-pulse">
+                {countdownRemaining}
+              </div>
+              <p className="mt-4 text-sm font-semibold tracking-wide text-white">
+                Get into your pose...
+              </p>
+              <button
+                type="button"
+                onClick={handleCancelCountdown}
+                className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-white/25 bg-black/80 px-4 py-2 text-xs font-bold text-red-300 hover:bg-red-500/20 transition"
+              >
+                <X className="h-4 w-4" />
+                Cancel Timer
+              </button>
+            </div>
+          )}
 
           {/* Camera Fallback Message Banner if No Webcam */}
           {cameraError && !uploadedImage && (
@@ -593,65 +785,99 @@ export const App: React.FC = () => {
                 </span>
               </div>
 
-              {activePose.place_info && (activePose.place_info.best_photo_spot || activePose.place_info.location_tips) && (
-                <div className="mt-2.5 rounded-xl border border-amber-400/25 bg-amber-500/10 p-2.5 text-xs text-amber-200">
-                  {activePose.place_info.best_photo_spot && (
-                    <div>
-                      <strong>Best Spot:</strong> {activePose.place_info.best_photo_spot}
-                    </div>
-                  )}
-                  {activePose.place_info.location_tips && (
-                    <div className="mt-0.5 text-amber-100/90">
-                      <strong>Maps Tip:</strong> {activePose.place_info.location_tips}
-                    </div>
-                  )}
-                </div>
-              )}
+              {activePose.place_info &&
+                (activePose.place_info.best_photo_spot || activePose.place_info.location_tips) && (
+                  <div className="mt-2.5 rounded-xl border border-amber-400/25 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+                    {activePose.place_info.best_photo_spot && (
+                      <div>
+                        <strong>Best Spot:</strong> {activePose.place_info.best_photo_spot}
+                      </div>
+                    )}
+                    {activePose.place_info.location_tips && (
+                      <div className="mt-0.5 text-amber-100/90">
+                        <strong>Maps Tip:</strong> {activePose.place_info.location_tips}
+                      </div>
+                    )}
+                  </div>
+                )}
             </div>
           )}
 
           {/* Bottom Shutter & Action Bar */}
-          <div className="absolute bottom-4 left-0 right-0 z-20 flex items-center justify-center gap-4 px-4">
+          <div className="absolute bottom-4 left-0 right-0 z-20 flex items-center justify-center gap-3 sm:gap-4 px-4">
             {/* Optional Maps/Search Quick Button */}
             <button
               type="button"
               onClick={() => setShowMapsModal(true)}
-              className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-xs font-semibold backdrop-blur-md border transition ${
+              className={`inline-flex items-center gap-2 rounded-2xl px-3.5 py-3 text-xs font-semibold backdrop-blur-md border transition ${
                 isGroundingActive
                   ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200'
                   : 'bg-black/65 border-white/15 text-gray-200 hover:bg-black/80'
               }`}
             >
               <MapPin className="h-4 w-4 text-cyan-400" />
-              <span>{isGroundingActive ? 'Edit Place' : 'Add Place / Maps'}</span>
+              <span className="hidden xs:inline">
+                {isGroundingActive ? 'Edit Place' : 'Add Place / Maps'}
+              </span>
             </button>
 
             {/* Primary AI Analyze & Pose Shutter Button */}
             <button
               type="button"
               disabled={isAnalyzing}
-              onClick={handleAnalyzeScene}
+              onClick={handleShutterClick}
               className="group relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-tr from-cyan-400 to-teal-300 p-1 shadow-[0_0_25px_rgba(0,229,255,0.5)] hover:scale-105 active:scale-95 transition disabled:opacity-60"
-              title="Analyze Scene & Recommend Best Pose"
+              title={
+                timerSeconds > 0
+                  ? `Start ${timerSeconds}s Countdown & Analyze Pose`
+                  : 'Click Photo & Recommend Best Pose'
+              }
             >
-              <div className="flex h-full w-full items-center justify-center rounded-full border-2 border-black/40 bg-transparent text-black">
+              <div className="flex h-full w-full flex-col items-center justify-center rounded-full border-2 border-black/40 bg-transparent text-black">
                 {isAnalyzing ? (
                   <RefreshCw className="h-6 w-6 animate-spin" />
+                ) : countdownRemaining !== null ? (
+                  <span className="text-lg font-black">{countdownRemaining}s</span>
                 ) : (
-                  <Sparkles className="h-6 w-6" />
+                  <>
+                    <Sparkles className="h-5 w-5" />
+                    {timerSeconds > 0 && (
+                      <span className="text-[9px] font-extrabold leading-none mt-0.5">
+                        {timerSeconds}s
+                      </span>
+                    )}
+                  </>
                 )}
               </div>
+            </button>
+
+            {/* Quick Cycle Timer Button in Bottom Bar (Optional Timer: Off -> 3s -> 5s -> 10s) */}
+            <button
+              type="button"
+              onClick={() => {
+                const nextIdx = (TIMER_OPTIONS.indexOf(timerSeconds) + 1) % TIMER_OPTIONS.length;
+                setTimerSeconds(TIMER_OPTIONS[nextIdx]);
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-2xl px-3.5 py-3 text-xs font-semibold backdrop-blur-md border transition ${
+                timerSeconds > 0
+                  ? 'bg-amber-400/25 border-amber-400 text-amber-200'
+                  : 'bg-black/65 border-white/15 text-gray-200 hover:bg-black/80'
+              }`}
+              title="Cycle Optional Timer (Off / 3s / 5s / 10s)"
+            >
+              <Timer className="h-4 w-4 text-amber-300" />
+              <span>{timerSeconds === 0 ? 'Click (No Timer)' : `Timer: ${timerSeconds}s`}</span>
             </button>
 
             {/* Download Snapshot Button */}
             <button
               type="button"
               onClick={handleDownloadSnapshot}
-              className="inline-flex items-center gap-2 rounded-2xl bg-black/65 border border-white/15 px-4 py-3 text-xs font-semibold text-gray-200 hover:bg-black/80 backdrop-blur-md transition"
+              className="inline-flex items-center gap-2 rounded-2xl bg-black/65 border border-white/15 px-3.5 py-3 text-xs font-semibold text-gray-200 hover:bg-black/80 backdrop-blur-md transition"
               title="Save Camera Frame"
             >
               <Download className="h-4 w-4 text-amber-300" />
-              <span className="hidden sm:inline">Save Photo</span>
+              <span className="hidden md:inline">Save Photo</span>
             </button>
           </div>
         </div>
@@ -670,18 +896,23 @@ export const App: React.FC = () => {
         onToggleMapsGps={handleToggleMapsGps}
         onToggleSearchGrounding={setIsSearchEnabled}
         onUpdatePlaceQuery={setCustomPlaceQuery}
-        onApplyAndAnalyze={handleAnalyzeScene}
+        onApplyAndAnalyze={executeImmediateCaptureAndAnalyze}
         onDisableAllAndReset={handleDisableAllLocation}
       />
 
-      {/* Saved Poses Drawer */}
+      {/* Saved Poses Drawer with Newest / Oldest Sorting Dropdown */}
       {showSavedDrawer && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-sm">
           <div className="flex h-full w-full max-w-md flex-col bg-[#12141F] border-l border-white/15 p-5 text-white">
             <div className="flex items-center justify-between border-b border-white/10 pb-4">
               <div className="flex items-center gap-2.5">
                 <Bookmark className="h-5 w-5 text-amber-400" />
-                <h2 className="text-lg font-bold">Saved Poses ({savedPoses.length})</h2>
+                <div>
+                  <h2 className="text-lg font-bold">Saved Poses ({savedPoses.length})</h2>
+                  <p className="text-[11px] text-gray-400">
+                    {isSupabaseSynced ? 'Synced with Supabase Cloud & Browser' : 'Stored in Browser LocalStorage'}
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
@@ -692,32 +923,59 @@ export const App: React.FC = () => {
               </button>
             </div>
 
+            {/* Sorting Dropdown Bar ('Newest' vs 'Oldest') */}
+            <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5">
+              <div className="flex items-center gap-2 text-xs font-medium text-gray-300">
+                <ArrowUpDown className="h-4 w-4 text-cyan-400" />
+                <label htmlFor="pose-sort-select">Sort by Timestamp:</label>
+              </div>
+              <select
+                id="pose-sort-select"
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as SortOrder)}
+                className="rounded-lg border border-white/15 bg-[#1B1E2E] px-3 py-1.5 text-xs font-semibold text-cyan-300 focus:border-cyan-400 focus:outline-none cursor-pointer"
+              >
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+              </select>
+            </div>
+
             <div className="mt-4 flex-1 space-y-3 overflow-y-auto pr-1">
-              {savedPoses.length === 0 ? (
+              {sortedSavedPoses.length === 0 ? (
                 <div className="flex h-64 flex-col items-center justify-center text-center text-gray-400">
                   <Bookmark className="h-10 w-10 mb-2 opacity-40" />
                   <p className="text-sm font-medium">No saved poses yet</p>
                   <p className="text-xs mt-1 max-w-xs">
-                    Tap the sparkle shutter button to generate a pose, then click "Save" to bookmark it here.
+                    Tap the shutter button to generate a pose, then click "Save" to bookmark it here.
                   </p>
                 </div>
               ) : (
-                savedPoses.map((pose) => (
+                sortedSavedPoses.map((pose) => (
                   <div
                     key={pose.id}
                     className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 hover:border-cyan-400/40 transition"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <span className="rounded bg-cyan-400/15 px-2 py-0.5 text-[10px] font-bold uppercase text-cyan-300">
-                          {pose.wireframeStyle}
-                        </span>
-                        {pose.locationName && (
-                          <span className="ml-1.5 inline-flex items-center gap-1 rounded bg-amber-400/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
-                            <MapPin className="h-2.5 w-2.5" />
-                            {pose.locationName}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="rounded bg-cyan-400/15 px-2 py-0.5 text-[10px] font-bold uppercase text-cyan-300">
+                            {pose.wireframeStyle}
                           </span>
-                        )}
+                          {pose.locationName && (
+                            <span className="inline-flex items-center gap-1 rounded bg-amber-400/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                              <MapPin className="h-2.5 w-2.5" />
+                              {pose.locationName}
+                            </span>
+                          )}
+                          <span className="text-[10px] text-gray-400">
+                            {new Date(pose.timestamp).toLocaleString([], {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })}
+                          </span>
+                        </div>
                         <h3 className="mt-1.5 font-bold text-sm">{pose.poseName}</h3>
                       </div>
                       <button
@@ -770,14 +1028,14 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Optional Gemini API Key Modal */}
+      {/* Optional Gemini API Key & Free Supabase Database Modal */}
       {showApiModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md rounded-3xl border border-white/15 bg-[#12141F] p-6 text-white shadow-2xl">
+          <div className="w-full max-w-lg rounded-3xl border border-white/15 bg-[#12141F] p-6 text-white shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <Key className="h-5 w-5 text-cyan-400" />
-                <h2 className="text-base font-bold">Gemini API Key (Vercel / Browser)</h2>
+                <h2 className="text-base font-bold">API Key & Optional Supabase Database</h2>
               </div>
               <button
                 type="button"
@@ -787,39 +1045,107 @@ export const App: React.FC = () => {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <p className="mt-2 text-xs text-gray-400 leading-relaxed">
-              When deployed on <strong>Vercel</strong>, you can set <code className="text-cyan-300">GEMINI_API_KEY</code> or{' '}
-              <code className="text-cyan-300">VITE_GEMINI_API_KEY</code> in your Vercel Project Environment Variables.
-              Optionally, you can also paste a key below to save it in your browser:
-            </p>
-            <input
-              type="password"
-              value={userApiKey}
-              onChange={(e) => setUserApiKey(e.target.value)}
-              placeholder="AIzaSy..."
-              className="mt-3 w-full rounded-xl border border-white/15 bg-black/50 px-3.5 py-2.5 text-sm text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none"
-            />
-            <div className="mt-4 flex justify-end gap-2">
+
+            {/* Section 1: Gemini API Key */}
+            <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+              <div className="text-xs font-bold uppercase tracking-wider text-cyan-300">
+                1. Gemini API Key (Optional)
+              </div>
+              <p className="mt-1 text-xs text-gray-400 leading-relaxed">
+                On Vercel, set <code className="text-cyan-300">GEMINI_API_KEY</code> in Environment Variables, or paste a key below for browser storage:
+              </p>
+              <input
+                type="password"
+                value={userApiKey}
+                onChange={(e) => setUserApiKey(e.target.value)}
+                placeholder="AIzaSy..."
+                className="mt-2.5 w-full rounded-xl border border-white/15 bg-black/50 px-3.5 py-2 text-sm text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none"
+              />
+            </div>
+
+            {/* Section 2: Optional Free Supabase Database */}
+            <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-emerald-300">
+                  <Database className="h-4 w-4" />
+                  <span>2. Free Supabase Cloud Database (Optional)</span>
+                </div>
+                <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                  {isSupabaseSynced ? 'Connected' : 'Local Mode'}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-gray-400 leading-relaxed">
+                Saved poses work automatically via browser <code className="text-gray-200">localStorage</code>. To sync across devices using a free <strong>Supabase</strong> project, set <code className="text-emerald-300">VITE_SUPABASE_URL</code> and <code className="text-emerald-300">VITE_SUPABASE_ANON_KEY</code> on Vercel or enter them below:
+              </p>
+              <input
+                type="text"
+                value={supabaseUrl}
+                onChange={(e) => setSupabaseUrl(e.target.value)}
+                placeholder="https://your-project.supabase.co"
+                className="mt-2.5 w-full rounded-xl border border-white/15 bg-black/50 px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:border-emerald-400 focus:outline-none"
+              />
+              <input
+                type="password"
+                value={supabaseAnonKey}
+                onChange={(e) => setSupabaseAnonKey(e.target.value)}
+                placeholder="Supabase Anon Public Key (eyJhbGci...)"
+                className="mt-2 w-full rounded-xl border border-white/15 bg-black/50 px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:border-emerald-400 focus:outline-none"
+              />
+
+              <div className="mt-3 flex items-center justify-between">
+                <span className="text-[11px] text-gray-400">
+                  Need the SQL table for Supabase SQL Editor?
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(SUPABASE_TABLE_SQL);
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2000);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300 hover:bg-white/15"
+                >
+                  <Copy className="h-3 w-3" />
+                  <span>{copiedSql ? 'Copied SQL!' : 'Copy Table SQL'}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => {
                   setUserApiKey('');
+                  setSupabaseUrl('');
+                  setSupabaseAnonKey('');
                   localStorage.removeItem(STORAGE_KEY_API_KEY);
+                  saveSupabaseConfig('', '');
+                  setIsSupabaseSynced(false);
                   setShowApiModal(false);
                 }}
                 className="rounded-xl border border-white/15 px-4 py-2 text-xs font-semibold text-gray-300 hover:bg-white/10"
               >
-                Clear
+                Reset All
               </button>
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   localStorage.setItem(STORAGE_KEY_API_KEY, userApiKey.trim());
+                  saveSupabaseConfig(supabaseUrl, supabaseAnonKey);
+                  const cfg = getSupabaseConfig();
+                  setIsSupabaseSynced(Boolean(cfg));
+                  if (cfg) {
+                    const remote = await fetchPosesFromSupabase(cfg);
+                    if (remote && remote.length > 0) {
+                      setSavedPoses(remote);
+                      localStorage.setItem(STORAGE_KEY_SAVED_POSES, JSON.stringify(remote));
+                    }
+                  }
                   setShowApiModal(false);
                 }}
-                className="rounded-xl bg-cyan-400 px-4 py-2 text-xs font-bold text-black hover:brightness-110"
+                className="rounded-xl bg-cyan-400 px-5 py-2 text-xs font-bold text-black hover:brightness-110"
               >
-                Save Key
+                Save Settings
               </button>
             </div>
           </div>
