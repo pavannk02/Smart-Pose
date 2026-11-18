@@ -1,36 +1,156 @@
-# Smart Pose — Web App (Vercel Ready)
+# Smart Pose
 
-Smart Pose is an AI-powered Web Camera Director with live SVG pose wireframes and **optional Google Maps & Google Search Grounding**.
+[Live demo](https://smart-pose.vercel.app)
 
-## 🚀 Deploy to Vercel in 1 Minute
+Smart Pose is an AI-assisted camera director that helps users choose natural poses for photos. It provides a live camera viewfinder, pose wireframes, optional location-aware recommendations, and saved poses.
 
-This repository is pre-configured at the root level with `package.json`, `vite.config.ts`, `vercel.json`, `index.html`, `/src`, and a Vercel Serverless API endpoint (`/api/analyze.js`).
+The repository contains a Vite/React web application, a Vercel serverless Gemini API endpoint, an Android application built with Kotlin and Jetpack Compose, and a separate FastAPI backend.
 
-1. **Export or Push to GitHub**:
-   - Export this project as a ZIP or push directly to a GitHub repository.
-2. **Import into Vercel**:
-   - Go to [vercel.com/new](https://vercel.com/new) and import your repository (or run `npx vercel` from the project root).
-   - **Framework Preset**: `Vite` (detected automatically via `vercel.json`).
-   - **Build Command**: `npm run build`
-   - **Output Directory**: `dist`
-3. **Environment Variable (Optional)**:
-   - Add `GEMINI_API_KEY` (or `VITE_GEMINI_API_KEY`) in your Vercel Project Settings → **Environment Variables**.
-   - You can also enter your Gemini API key directly inside the web app's **Key Settings** button in the top bar, or use the built-in location-aware pose presets immediately with no key required.
+## Features
 
-## 💻 Run Locally in Any Browser
+- Live WebRTC camera preview with front/back-camera switching where supported
+- Interactive SVG pose wireframes
+- Five built-in pose styles:
+  - Classic standing
+  - Walking stride
+  - Seated café pose
+  - Over-the-shoulder
+  - Crossed arms
+- Camera mirroring and rule-of-thirds guides
+- Photo capture and upload fallback
+- Saved pose library using browser `localStorage`
+- Optional Google Maps and Google Search grounding
+- Gemini-powered scene and outfit analysis
+- Android app implementation with Jetpack Compose and CameraX
+- Python FastAPI pose-analysis service
+
+## Web application
+
+### Requirements
+
+- Node.js 18 or newer
+- npm
+- A Gemini API key for live AI analysis
+- Camera and location permissions are browser/OS dependent
+
+### Run locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-Then open `http://localhost:3000` in your browser.
+Open `http://localhost:3000`, or the local URL printed by Vite.
 
-## ✨ Web Features
+### Build
 
-- **Live WebRTC Camera (`getUserMedia`)**: Works on mobile and desktop browsers with Front/Back camera switching, mirror toggle, rule-of-thirds grid, and photo upload fallback.
-- **5 Interactive SVG Pose Wireframes**: `Classic Stand`, `Walking Stride`, `Seated Cafe`, `Over Shoulder`, and `Crossed Arms`.
-- **Optional Live Google Maps & Place Search**:
-  - Disabled by default so you can use normal camera mode without location permissions.
-  - When enabled, uses Browser Geolocation (`navigator.geolocation`), reverse geocoding, an interactive embedded Google Maps preview, and Gemini `googleMaps` + `googleSearch` grounding tools to recommend site-specific poses and best photo spots.
-- **Saved Poses Library**: Bookmark poses to `localStorage` and reload them onto the live viewfinder anytime.
+```bash
+npm run build
+npm run preview
+```
+
+The production output is written to `dist/`.
+
+### Configuration
+
+Copy the environment example and add a key if server-side Gemini analysis is available:
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+GEMINI_API_KEY=your_gemini_api_key
+```
+
+For Vercel, add `GEMINI_API_KEY` in **Project Settings → Environment Variables**. Do not commit real API keys.
+
+The web API is implemented in `api/analyze.js` and is deployed as a Vercel serverless function. The endpoint accepts `POST` requests containing an optional base64 image and location or grounding options.
+
+Optional location-aware features require browser geolocation permission. Google Maps and Google Search grounding are enabled only when the corresponding options and location context are available.
+
+## Android application
+
+The Android project uses Kotlin, Jetpack Compose, CameraX, Retrofit, Moshi, Room, and CameraX permissions support.
+
+### Requirements
+
+- Android Studio with an SDK that includes API 36
+- JDK 11 or compatible with the project configuration
+- Android device or emulator with API 24 or newer
+
+### Run
+
+1. Open the repository root in Android Studio.
+2. Let Gradle synchronize the project.
+3. Create a `.env` file in the repository root if local secrets are needed:
+
+```dotenv
+GEMINI_API_KEY=your_gemini_api_key
+```
+
+4. Select the `app` module and run it on a device or emulator.
+
+A `release` signing configuration also reads `KEYSTORE_PATH`, `STORE_PASSWORD`, and `KEY_PASSWORD` from the environment. The configured keystore defaults to `my-upload-key.jks` in the repository root.
+
+## FastAPI backend
+
+A separate Python backend is available in `backend/main.py`.
+
+### Run locally
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install fastapi uvicorn pydantic google-generativeai
+export GEMINI_API_KEY="your_gemini_api_key"
+uvicorn main:app --reload
+```
+
+Without `GEMINI_API_KEY`, the backend returns a mock pose response so the API and frontend can still be exercised.
+
+API endpoints:
+
+```text
+POST /analyze-pose
+GET  /
+```
+
+## Deploy to Vercel
+
+This repository includes `vercel.json` and a Vite build configuration.
+
+```bash
+npm install
+npm run build
+npx vercel
+```
+
+In the Vercel project settings:
+
+1. Use `Vite` as the framework preset.
+2. Set the build command to `npm run build`.
+3. Set the output directory to `dist`.
+4. Add `GEMINI_API_KEY` to the environment variables.
+
+## Repository layout
+
+```text
+api/          Vercel serverless Gemini endpoint
+app/          Android Jetpack Compose application
+backend/      Separate FastAPI backend
+src/          Web application source
+web/          Alternative web project directory
+```
+
+## Privacy and API keys
+
+- Keep Gemini API keys in environment variables or a secrets manager.
+- Never commit real credentials or signing passwords.
+- The browser may request camera and location permissions; location features remain optional.
+- Saved web poses are stored locally in the browser.
+
+## License
+
+No license is currently specified. Add one before using or redistributing the project if reuse rights are not already established privately.
